@@ -103,6 +103,21 @@ export async function syncAllClients(): Promise<{ success: boolean; message: str
         if (clientData.documentDetails && Array.isArray(clientData.documentDetails)) {
           for (const doc of clientData.documentDetails) {
             try {
+              // 🕵️ VALIDACIÓN ADICIONAL DE ARCHIVOS
+              // No confiar ciegamente en doc.hasFiles. Verificar la lista real de archivos.
+              // Filtrar archivos basura o temporales que puedan haber pasado
+              const validFiles = (doc.files || []).filter((f: any) => {
+                if (!f.name) return false;
+                const name = f.name.toLowerCase();
+                return !name.startsWith('~$') && // Archivos temporales de Office
+                       !name.startsWith('.') &&  // Archivos ocultos (.DS_Store, etc)
+                       name !== 'desktop.ini' && // Windows
+                       name !== 'thumbs.db';     // Windows
+              });
+
+              const realHasFiles = validFiles.length > 0;
+              const realFileCount = validFiles.length;
+
               // Insertar o actualizar documento
               const { data: docResult, error: docError } = await supabase
                 .from('documents')
@@ -111,8 +126,8 @@ export async function syncAllClients(): Promise<{ success: boolean; message: str
                   type: doc.type,
                   label: doc.label || doc.type,
                   exists: doc.exists || false,
-                  has_files: doc.hasFiles || false,
-                  file_count: doc.fileCount || 0,
+                  has_files: realHasFiles, // Usar valor recalculado
+                  file_count: realFileCount, // Usar valor recalculado
                   folder_id: doc.folderId || null,
                   folder_url: doc.folderUrl || null,
                   updated_at: new Date().toISOString()
@@ -132,9 +147,9 @@ export async function syncAllClients(): Promise<{ success: boolean; message: str
               const insertedDoc = docResult[0];
               documentsUpdated++;
 
-              // Procesar archivos del documento
-              if (doc.files && Array.isArray(doc.files) && doc.files.length > 0) {
-                for (const file of doc.files) {
+              // Procesar archivos del documento (usando la lista filtrada)
+              if (validFiles.length > 0) {
+                for (const file of validFiles) {
                   try {
                     const { error: fileError } = await supabase
                       .from('files')

@@ -1,10 +1,11 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Users, Eye, RefreshCw, FolderOpen, AlertCircle, Info } from 'lucide-react';
+import { Users, Eye, RefreshCw, FolderOpen, AlertCircle, Info, FolderPlus, X } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { CONFIG } from '@/config/urls';
 import { getCachedDashboard, setCachedDashboard } from '@/utils/clientCache';
+import { FolderForm } from './FolderForm';
 
 interface Client {
   rowNumber: number;
@@ -32,6 +33,8 @@ interface ClientDashboardProps {
 export function ClientDashboard({ onClientSelect }: ClientDashboardProps) {
   const [clients, setClients] = useState<Client[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isFolderModalOpen, setIsFolderModalOpen] = useState(false);
+  const [isCreatingFolder, setIsCreatingFolder] = useState(false);
   const [stats, setStats] = useState<{
     totalClients: number;
     totalDocuments: number;
@@ -164,7 +167,38 @@ export function ClientDashboard({ onClientSelect }: ClientDashboardProps) {
     }
   };
 
+  const handleCreateFolder = async (data: { appScriptUrl: string }) => {
+    setIsCreatingFolder(true);
+    try {
+      const response = await fetch('/api/create-folder', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(data),
+      });
 
+      const result = await response.json();
+
+      if (result.success) {
+        toast.success('Carpeta creada exitosamente en Google Drive');
+        setIsFolderModalOpen(false);
+        
+        // Esperar un momento para que Google indexe y luego sincronizar
+        toast.loading('Actualizando lista de clientes...', { duration: 3000 });
+        setTimeout(() => {
+          loadAllClients(true);
+        }, 2000);
+      } else {
+        toast.error('Error: ' + result.error);
+      }
+    } catch (error) {
+      console.error('Error creando carpeta:', error);
+      toast.error('Error al conectar con el servidor');
+    } finally {
+      setIsCreatingFolder(false);
+    }
+  };
 
   const handleClientClick = (client: Client) => {
     onClientSelect(client.nombre, client.cedula);
@@ -260,7 +294,7 @@ export function ClientDashboard({ onClientSelect }: ClientDashboardProps) {
       
       <div className="p-4 sm:p-6">
         {/* Controles */}
-        <div className="flex gap-3 sm:gap-4 mb-6">
+        <div className="flex flex-wrap gap-3 sm:gap-4 mb-6">
           <button
             onClick={() => loadAllClients(true)}
             disabled={isLoading}
@@ -275,7 +309,42 @@ export function ClientDashboard({ onClientSelect }: ClientDashboardProps) {
             <span className="hidden sm:inline">{isLoading ? 'Sincronizando...' : 'Sincronizar'}</span>
             <span className="sm:hidden">{isLoading ? '...' : 'Sync'}</span>
           </button>
+
+          <button
+            onClick={() => setIsFolderModalOpen(true)}
+            disabled={isLoading}
+            className="flex items-center gap-2 px-3 sm:px-4 py-2 sm:py-2.5 rounded-lg text-white text-sm font-medium transition-all bg-[#3B82F6] hover:bg-[#2563EB] shadow-sm hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Crear carpeta para el último cliente del Sheet"
+          >
+            <FolderPlus className="h-4 w-4" />
+            <span className="hidden sm:inline">Crear Carpeta Reciente</span>
+            <span className="sm:hidden">Crear Carpeta</span>
+          </button>
         </div>
+
+        {/* Modal de Crear Carpeta */}
+        {isFolderModalOpen && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
+            <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full p-6 relative animate-in zoom-in-95 duration-200">
+              <button 
+                onClick={() => setIsFolderModalOpen(false)}
+                className="absolute top-4 right-4 p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-colors"
+              >
+                <X className="h-5 w-5" />
+              </button>
+              
+              <h2 className="text-xl font-bold text-gray-800 mb-6 flex items-center gap-2">
+                <FolderPlus className="h-6 w-6 text-blue-600" />
+                Crear Carpeta desde Google Sheet
+              </h2>
+              
+              <FolderForm 
+                onSubmit={handleCreateFolder} 
+                isLoading={isCreatingFolder} 
+              />
+            </div>
+          </div>
+        )}
 
         {/* Estadísticas */}
         {stats && (

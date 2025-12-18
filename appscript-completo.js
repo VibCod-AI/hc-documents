@@ -525,6 +525,8 @@ function getAllClientDocuments(clientFolder) {
               console.log('🗑️ [DEBUG] ✅ Archivo en papelera (IGNORADO):', fileName);
             } else if (fileSize === 0) {
               console.log('📏 [DEBUG] ✅ Archivo vacío (IGNORADO):', fileName);
+            } else if (fileName.indexOf('~$') === 0 || fileName.indexOf('.') === 0 || fileName === 'desktop.ini' || fileName === 'Thumbs.db') {
+              console.log('👻 [DEBUG] ✅ Archivo temporal/oculto (IGNORADO):', fileName);
             } else {
               isValidFile = true;
               console.log('✅ [DEBUG] Archivo VÁLIDO:', fileName, 'Tamaño:', fileSize);
@@ -628,6 +630,8 @@ function getSubfolderPath(clientFolder, documentType) {
               console.log('🗑️ [DEBUG] ✅ Archivo en papelera (IGNORADO):', fileName);
             } else if (fileSize === 0) {
               console.log('📏 [DEBUG] ✅ Archivo vacío (IGNORADO):', fileName);
+            } else if (fileName.indexOf('~$') === 0 || fileName.indexOf('.') === 0 || fileName === 'desktop.ini' || fileName === 'Thumbs.db') {
+              console.log('👻 [DEBUG] ✅ Archivo temporal/oculto (IGNORADO):', fileName);
             } else {
               isValidFile = true;
               console.log('✅ [DEBUG] Archivo VÁLIDO:', fileName, 'Tamaño:', fileSize);
