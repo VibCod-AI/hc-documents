@@ -30,7 +30,7 @@ function logRequest(method, e, extra) {
 }
 
 
-// --- ENDPOINT GET (para pruebas desde navegador prueba) ---
+// --- ENDPOINT GET (para pruebas desde navegador ) ---
 function doGet(e) {
   try {
     // Si hay parámetros, procesarlos
