@@ -8,6 +8,7 @@ import { CONFIG } from '@/config/urls';
 interface FolderFormProps {
   onSubmit: (data: {
     appScriptUrl: string;
+    action: 'createMissingFolders' | 'createLast';
   }) => void;
   isLoading: boolean;
 }
@@ -15,6 +16,7 @@ interface FolderFormProps {
 export function FolderForm({ onSubmit, isLoading }: FolderFormProps) {
   const [formData, setFormData] = useState({
     appScriptUrl: CONFIG.APP_SCRIPT_URL,
+    mode: 'createMissingFolders' as 'createMissingFolders' | 'createLast'
   });
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -36,10 +38,11 @@ export function FolderForm({ onSubmit, isLoading }: FolderFormProps) {
 
     onSubmit({
       appScriptUrl: formData.appScriptUrl.trim(),
+      action: formData.mode
     });
   };
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
     setFormData(prev => ({
       ...prev,
@@ -55,15 +58,40 @@ export function FolderForm({ onSubmit, isLoading }: FolderFormProps) {
           📋 ¿Cómo funciona?
         </h3>
         <ul className="text-sm text-blue-700 space-y-1">
-          <li>• El App Script lee automáticamente la última fila de tu Google Sheet</li>
-          <li>• Toma los datos del cliente (fecha, nombre, cédula)</li>
-          <li>• Crea una carpeta con el formato: fecha_nombre_cedula</li>
-          <li>• Genera las 8 subcarpetas necesarias para el proceso</li>
-          <li>• Actualiza la columna F del Sheet con la URL de la carpeta</li>
+          <li>• Lee tu Google Sheet para identificar clientes sin carpeta</li>
+          <li>• Crea automáticamente las carpetas para TODOS los clientes faltantes</li>
+          <li>• Genera las 8 subcarpetas necesarias para cada uno</li>
+          <li>• Actualiza la columna F del Sheet con las URLs generadas</li>
         </ul>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-6">
+        {/* Selector de modo */}
+        <div className="flex justify-center gap-4 mb-4">
+          <label className={`cursor-pointer px-4 py-2 rounded-lg border ${formData.mode === 'createMissingFolders' ? 'bg-blue-100 border-blue-500 text-blue-700' : 'bg-white border-gray-300 text-gray-700'}`}>
+            <input 
+              type="radio" 
+              name="mode" 
+              value="createMissingFolders" 
+              checked={formData.mode === 'createMissingFolders'} 
+              onChange={handleInputChange} 
+              className="sr-only"
+            />
+            <span className="font-medium">Crear Todas las Faltantes</span>
+          </label>
+          <label className={`cursor-pointer px-4 py-2 rounded-lg border ${formData.mode === 'createLast' ? 'bg-blue-100 border-blue-500 text-blue-700' : 'bg-white border-gray-300 text-gray-700'}`}>
+            <input 
+              type="radio" 
+              name="mode" 
+              value="createLast" 
+              checked={formData.mode === 'createLast'} 
+              onChange={handleInputChange} 
+              className="sr-only"
+            />
+            <span className="font-medium">Solo Último Cliente</span>
+          </label>
+        </div>
+
         {/* Botón principal */}
         <div className="flex justify-center">
           <button
@@ -74,12 +102,12 @@ export function FolderForm({ onSubmit, isLoading }: FolderFormProps) {
             {isLoading ? (
               <>
                 <Loader2 className="h-6 w-6 animate-spin" />
-                Procesando último cliente...
+                Procesando...
               </>
             ) : (
               <>
                 <FolderPlus className="h-6 w-6" />
-                Crear Carpeta del Último Cliente
+                {formData.mode === 'createMissingFolders' ? 'Crear Carpetas Faltantes' : 'Crear Carpeta del Último'}
               </>
             )}
           </button>

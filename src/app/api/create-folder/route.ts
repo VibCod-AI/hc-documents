@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { appScriptUrl } = body;
+    const { appScriptUrl, action } = body;
 
     // Validar datos de entrada
     if (!appScriptUrl) {
@@ -29,15 +29,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.log('Llamando al App Script:', appScriptUrl);
+    console.log('Llamando al App Script:', appScriptUrl, 'con acción:', action || 'default');
 
-    // Llamar al App Script (solo POST sin datos, tu script lee del Sheet)
+    // Preparar payload
+    // Si la acción es createMissingFolders, enviarla. Si no, enviar objeto vacío para mantener comportamiento original
+    const payload = action === 'createMissingFolders' 
+      ? { action: 'createMissingFolders' } 
+      : {};
+
+    // Llamar al App Script
     const response = await fetch(appScriptUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({}), // Enviar objeto vacío
+      body: JSON.stringify(payload),
     });
 
     // Verificar si la respuesta es exitosa
@@ -75,10 +81,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Verificar el resultado del App Script (tu formato: {ok: true/false, folderUrl: string, error?: string})
+    // Verificar el resultado del App Script
     if (result.ok) {
+      
+      // Caso 1: Creación de carpetas en lote
+      if (action === 'createMissingFolders' && result.data) {
+        return NextResponse.json({
+          success: true,
+          data: result.data,
+          message: result.message || 'Proceso de creación de carpetas completado',
+        });
+      }
+
+      // Caso 2: Creación de carpeta única (comportamiento original)
       // Extraer ID de la carpeta de la URL
-      const urlMatch = result.folderUrl.match(/\/folders\/([a-zA-Z0-9-_]+)/);
+      const urlMatch = result.folderUrl ? result.folderUrl.match(/\/folders\/([a-zA-Z0-9-_]+)/) : null;
       const folderId = urlMatch ? urlMatch[1] : 'unknown';
       
       return NextResponse.json({

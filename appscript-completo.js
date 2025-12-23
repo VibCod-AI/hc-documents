@@ -30,7 +30,7 @@ function logRequest(method, e, extra) {
 }
 
 
-// --- ENDPOINT GET (para pruebas desde navegador) ---
+// --- ENDPOINT GET (para pruebas desde navegador prueba) ---
 function doGet(e) {
   try {
     // Si hay parámetros, procesarlos
@@ -343,6 +343,34 @@ function doPost(e) {
       ).setMimeType(ContentService.MimeType.JSON);
     }
     
+    // Si es para crear carpetas faltantes en lote
+    if (requestData.action === 'createMissingFolders') {
+      logRequest("POST", e, "Iniciando creación de carpetas faltantes en lote");
+      
+      try {
+        var result = createMissingFolders();
+        
+        logRequest("POST", e, "Proceso completado: " + result.createdCount + " carpetas creadas");
+        
+        return ContentService.createTextOutput(
+          JSON.stringify({ 
+            ok: true, 
+            data: result,
+            message: "Se procesaron " + result.totalProcessed + " clientes. Se crearon " + result.createdCount + " carpetas nuevas."
+          })
+        ).setMimeType(ContentService.MimeType.JSON);
+        
+      } catch (error) {
+        logRequest("POST", e, "Error creando carpetas faltantes: " + error.message);
+        return ContentService.createTextOutput(
+          JSON.stringify({ 
+            ok: false, 
+            error: "Error creando carpetas: " + error.message
+          })
+        ).setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+
     // Si no es búsqueda, usar la función original (crear carpeta)
     var folderUrl = createLastClientFolder();
     
@@ -762,6 +790,98 @@ function getAllClientsFromSheet() {
     console.error('Error obteniendo clientes:', error);
     throw error;
   }
+}
+
+
+// --- FUNCIÓN PARA CREAR CARPETAS FALTANTES EN LOTE ---
+function createMissingFolders() {
+  console.log('🚀 Iniciando creación de carpetas faltantes...');
+  var rootFolder = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  var ss = SpreadsheetApp.openById(DATA_SHEET_ID);
+  var sheet = ss.getSheetByName(DATA_SHEET_NAME);
+  
+  var lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return { totalProcessed: 0, createdCount: 0, details: [] };
+  
+  // Leer todos los datos: rango desde fila 2 hasta última fila, columnas A-F (1-6)
+  var range = sheet.getRange(2, 1, lastRow - 1, 6);
+  var data = range.getValues();
+  
+  var createdCount = 0;
+  var details = [];
+  
+  var subFolders = [
+    "01_escritura", "02_pagare", "03_contrato_credito", "04_carta_de_instrucciones",
+    "05_aceptacion_de_credito", "06_avaluo", "07_contrato_interco", "08_Finanzas"
+  ];
+  
+  for (var i = 0; i < data.length; i++) {
+    var row = data[i];
+    var rowIndex = i + 2; // +2 porque el array empieza en 0 y el sheet tiene header en fila 1
+    
+    // Verificar si tiene datos mínimos (fecha, nombre, cédula)
+    if (!row[1] || !row[2] || !row[3]) continue;
+    
+    var fechaRaw = row[1];
+    var nombre = row[2];
+    var cedula = row[3];
+    var existingUrl = row[5]; // Columna F
+    
+    // Si ya tiene URL en el sheet, asumimos que tiene carpeta (o intentar verificar si existe)
+    if (existingUrl && existingUrl.toString().trim() !== "") {
+      // Opcional: Podríamos verificar si la carpeta realmente existe con DriveApp, 
+      // pero para optimizar asumimos que si está en el sheet, está bien.
+      continue;
+    }
+    
+    // Intentar buscar si ya existe una carpeta (pero no estaba anotada en el sheet)
+    var existingFolder = findClientFolder(nombre, cedula.toString());
+    
+    if (existingFolder) {
+      // Si existe pero no estaba en el sheet, actualizamos el sheet
+      console.log('✅ Carpeta ya existía para:', nombre, '- Actualizando Sheet...');
+      sheet.getRange(rowIndex, 6).setValue(existingFolder.getUrl());
+      details.push({ name: nombre, status: 'linked', url: existingFolder.getUrl() });
+      continue;
+    }
+    
+    // SI NO EXISTE: CREARLA
+    console.log('🔨 Creando carpeta para:', nombre);
+    
+    try {
+      var fecha = Utilities.formatDate(new Date(fechaRaw), Session.getScriptTimeZone(), "yyyyMMdd");
+      var nombreFormat = nombre.toString().trim().replace(/\s+/g, "_").toLowerCase();
+      var cedulaFormat = cedula.toString().replace(/[^\d]/g, "");
+      
+      var folderName = fecha + "_" + nombreFormat + "_" + cedulaFormat;
+      var clientFolder = rootFolder.createFolder(folderName);
+      
+      // Crear subcarpetas
+      subFolders.forEach(function(subName) {
+        clientFolder.createFolder(subName);
+      });
+      
+      // Guardar URL en el sheet
+      sheet.getRange(rowIndex, 6).setValue(clientFolder.getUrl());
+      
+      createdCount++;
+      details.push({ name: nombre, status: 'created', url: clientFolder.getUrl() });
+      
+      // Pequeña pausa para no saturar API de Drive si son muchos
+      Utilities.sleep(500);
+      
+    } catch (err) {
+      console.error('❌ Error creando carpeta para ' + nombre + ':', err);
+      details.push({ name: nombre, status: 'error', error: err.message });
+    }
+  }
+  
+  console.log('🏁 Finalizado. Creadas:', createdCount);
+  return {
+    totalProcessed: data.length,
+    createdCount: createdCount,
+    details: details
+  };
 }
 
 

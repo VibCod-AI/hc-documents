@@ -167,7 +167,7 @@ export function ClientDashboard({ onClientSelect }: ClientDashboardProps) {
     }
   };
 
-  const handleCreateFolder = async (data: { appScriptUrl: string }) => {
+  const handleCreateFolder = async (data: { appScriptUrl: string; action: 'createMissingFolders' | 'createLast' }) => {
     setIsCreatingFolder(true);
     try {
       const response = await fetch('/api/create-folder', {
@@ -181,7 +181,12 @@ export function ClientDashboard({ onClientSelect }: ClientDashboardProps) {
       const result = await response.json();
 
       if (result.success) {
-        toast.success('Carpeta creada exitosamente en Google Drive');
+        if (data.action === 'createMissingFolders' && result.data && result.data.createdCount !== undefined) {
+           toast.success(`Proceso completado: ${result.data.createdCount} carpetas creadas`, { duration: 5000 });
+        } else {
+           toast.success('Carpeta creada exitosamente en Google Drive');
+        }
+        
         setIsFolderModalOpen(false);
         
         // Esperar un momento para que Google indexe y luego sincronizar
