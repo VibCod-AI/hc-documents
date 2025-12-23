@@ -384,8 +384,8 @@ export function ClientDocumentManager({ preloadedClient, hideSearchForm = false 
 
   const getCompletionPercentage = () => {
     if (!clientInfo) return 0;
-    const completed = clientInfo.documents.filter(doc => doc.exists).length;
-    return Math.round((completed / clientInfo.documents.length) * 100);
+    const completed = clientInfo.documents.filter(doc => doc.hasFiles && doc.fileCount > 0).length;
+    return Math.round((completed / 8) * 100); // Usar 8 como base fija total
   };
 
   return (
@@ -491,7 +491,7 @@ export function ClientDocumentManager({ preloadedClient, hideSearchForm = false 
                     {getCompletionPercentage()}%
                   </div>
                   <div className="text-sm text-[#6B7280] mt-1">
-                    {clientInfo.documents.filter(doc => doc.exists).length}/8 documentos
+                    {clientInfo.documents.filter(doc => doc.hasFiles && doc.fileCount > 0).length}/8 documentos
                   </div>
                   {clientInfo.folderUrl && (
                     <a
