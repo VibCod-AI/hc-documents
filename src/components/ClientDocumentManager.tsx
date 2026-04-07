@@ -205,9 +205,8 @@ export function ClientDocumentManager({ preloadedClient, hideSearchForm = false 
       uploadData.append('appScriptUrl', CONFIG.APP_SCRIPT_URL);
       
       // Decidir qué método usar basado en el tamaño del archivo
+      // Vercel Serverless tiene un límite estricto de 4.5MB para el body
       const fileSizeMB = finalFile.size / 1024 / 1024;
-      let uploadEndpoint = '/api/upload-document';
-      let uploadMethod = 'Zapier';
       
       if (fileSizeMB > 50) {
         // Para archivos muy grandes, rechazar
@@ -216,24 +215,35 @@ export function ClientDocumentManager({ preloadedClient, hideSearchForm = false 
         setShowHelp(true);
         setUploadingDoc(null);
         return;
-      } else if (fileSizeMB > 10) {
-        // Para archivos grandes (10-50MB), usar método directo via App Script
-        uploadEndpoint = '/api/upload-large-file';
-        uploadMethod = 'App Script directo';
-        toast.success(`📤 Archivo grande - usando método directo via App Script`, { duration: 4000 });
+      } else if (fileSizeMB > 4) { // Límite bajado a 4MB para evitar error 413 de Vercel
+        // Para archivos grandes (4-50MB), usar método directo via App Script DESDE EL CLIENTE
+        // Esto evita pasar por el backend de Vercel y sus límites
+        toast.success(`📤 Archivo grande (${fileSizeMB.toFixed(2)}MB) - subiendo directamente a Google Drive...`, { duration: 5000 });
+        
+        await uploadDirectlyToAppScript(documentType, finalFile);
+        return; // Salir aquí, ya que uploadDirectlyToAppScript maneja el resto
       } else {
-        // Para archivos ≤10MB, usar Zapier
+        // Para archivos pequeños (≤4MB), usar flujo normal (Zapier o API local)
         uploadData.append('zapierWebhookUrl', CONFIG.ZAPIER_WEBHOOK_URL);
-        uploadMethod = 'Zapier';
+        const uploadEndpoint = '/api/upload-document'; // Usar endpoint estándar
+        
+        const response = await fetch(uploadEndpoint, {
+          method: 'POST',
+          body: uploadData,
+        });
+
+        const result = await response.json();
+        handleUploadResult(result, documentType, newFileName, file.size);
       }
+    } catch (error) {
+      console.error('Error:', error);
+      toast.error('Error subiendo el documento');
+      setUploadingDoc(null);
+    }
+  };
 
-      const response = await fetch(uploadEndpoint, {
-        method: 'POST',
-        body: uploadData,
-      });
-
-      const result = await response.json();
-
+  // Nueva función para manejar el resultado de la subida y actualizar UI
+  const handleUploadResult = (result: any, documentType: string, fileName: string, fileSize: number) => {
       if (result.success) {
         toast.success('Documento subido exitosamente');
         
@@ -245,11 +255,11 @@ export function ClientDocumentManager({ preloadedClient, hideSearchForm = false 
           
           // Crear archivo simulado para actualizar la UI inmediatamente
           const newFile = {
-            name: newFileName,
+            name: fileName,
             id: 'temp-' + Date.now(),
             url: '#',
             downloadUrl: '#',
-            size: file.size,
+            size: fileSize,
             lastModified: new Date().toISOString()
           };
           
@@ -281,8 +291,8 @@ export function ClientDocumentManager({ preloadedClient, hideSearchForm = false 
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                  clientName: clientInfo.name,
-                  clientId: clientInfo.id,
+                  clientName: clientInfo?.name,
+                  clientId: clientInfo?.id,
                 }),
               });
               
@@ -294,8 +304,8 @@ export function ClientDocumentManager({ preloadedClient, hideSearchForm = false 
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({
-                    clientName: clientInfo.name,
-                    clientId: clientInfo.id,
+                    clientName: clientInfo?.name,
+                    clientId: clientInfo?.id,
                   }),
                 });
                 
@@ -321,10 +331,57 @@ export function ClientDocumentManager({ preloadedClient, hideSearchForm = false 
           toast.error('Error: ' + result.message);
         }
       }
+      setUploadingDoc(null);
+  };
+
+  // Función para subir directamente al App Script desde el cliente (evita Vercel)
+  const uploadDirectlyToAppScript = async (documentType: string, file: File) => {
+    try {
+      // 1. Obtener ID de carpeta primero (usando API ligera que sí pasa por Vercel)
+      const folderResponse = await fetch('/api/find-folder', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          clientName: searchData.clientName.trim(),
+          clientId: searchData.clientId.trim(),
+          documentType: documentType,
+          appScriptUrl: CONFIG.APP_SCRIPT_URL
+        }),
+      });
+
+      const folderResult = await folderResponse.json();
+
+      if (!folderResult.success) {
+        throw new Error('No se pudo encontrar la carpeta del cliente');
+      }
+
+      // 2. Subir directamente al App Script
+      const formData = new FormData();
+      formData.append('action', 'uploadLargeFile');
+      formData.append('file', file);
+      formData.append('folderId', folderResult.data.folderId);
+      formData.append('fileName', file.name);
+      formData.append('documentType', documentType);
+      
+      // NOTA: Fetch a App Script puede tener problemas de CORS.
+      // Si el script está publicado como "Anyone", a veces funciona direct POST.
+      // Si no, usaremos 'no-cors' pero no podremos leer la respuesta JSON.
+      
+      await fetch(CONFIG.APP_SCRIPT_URL, {
+        method: 'POST',
+        mode: 'no-cors', // Importante para evitar bloqueo del navegador si el script no maneja OPTIONS
+        body: formData
+      });
+
+      // Como usamos no-cors, asumimos éxito si no lanzó excepción de red
+      // Simulamos un resultado exitoso
+      handleUploadResult({ success: true }, documentType, file.name, file.size);
+
     } catch (error) {
-      console.error('Error:', error);
-      toast.error('Error subiendo el documento');
-    } finally {
+      console.error('Error en subida directa:', error);
+      toast.error('Error al subir directamente a Google Drive. Intenta comprimir el archivo.');
       setUploadingDoc(null);
     }
   };

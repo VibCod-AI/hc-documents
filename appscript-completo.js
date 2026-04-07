@@ -398,18 +398,18 @@ function createLastClientFolder() {
   var sheet = ss.getSheetByName(DATA_SHEET_NAME);
 
   var lastRow = sheet.getLastRow();
-  var data = sheet.getRange(lastRow, 2, 1, 3).getValues()[0];
-  // col 2: fecha, col 3: nombre, col 4: cédula
+  var data = sheet.getRange(lastRow, 1, 1, 4).getValues()[0];
+  // col 1: crédito (ID), col 2: fecha, col 3: nombre, col 4: cédula
 
-  var fechaRaw = data[0];
-  var nombre   = data[1];
-  var cedula   = data[2];
+  var idCredito = data[0];
+  var nombre    = data[2];
+  var cedula    = data[3];
 
-  var fecha = Utilities.formatDate(new Date(fechaRaw), Session.getScriptTimeZone(), "yyyyMMdd");
+  var idCreditoFormat = idCredito.toString().trim();
   var nombreFormat = nombre.trim().replace(/\s+/g, "_").toLowerCase();
   var cedulaFormat = cedula.toString().replace(/[^\d]/g, "");
 
-  var folderName = fecha + "_" + nombreFormat + "_" + cedulaFormat;
+  var folderName = idCreditoFormat + "_" + nombreFormat + "_" + cedulaFormat;
 
   var clientFolder = rootFolder.createFolder(folderName);
 
@@ -819,13 +819,13 @@ function createMissingFolders() {
     var row = data[i];
     var rowIndex = i + 2; // +2 porque el array empieza en 0 y el sheet tiene header en fila 1
     
-    // Verificar si tiene datos mínimos (fecha, nombre, cédula)
-    if (!row[1] || !row[2] || !row[3]) continue;
+    // Verificar si tiene datos mínimos (crédito, nombre, cédula)
+    if (!row[0] || !row[2] || !row[3]) continue;
     
-    var fechaRaw = row[1];
-    var nombre = row[2];
-    var cedula = row[3];
-    var existingUrl = row[5]; // Columna F
+    var idCredito = row[0]; // Columna A: ID del crédito
+    var nombre = row[2];    // Columna C: Nombre
+    var cedula = row[3];    // Columna D: Cédula
+    var existingUrl = row[5]; // Columna F: URL carpeta
     
     // Si ya tiene URL en el sheet, asumimos que tiene carpeta (o intentar verificar si existe)
     if (existingUrl && existingUrl.toString().trim() !== "") {
@@ -849,11 +849,11 @@ function createMissingFolders() {
     console.log('🔨 Creando carpeta para:', nombre);
     
     try {
-      var fecha = Utilities.formatDate(new Date(fechaRaw), Session.getScriptTimeZone(), "yyyyMMdd");
+      var idCreditoFormat = idCredito.toString().trim();
       var nombreFormat = nombre.toString().trim().replace(/\s+/g, "_").toLowerCase();
       var cedulaFormat = cedula.toString().replace(/[^\d]/g, "");
       
-      var folderName = fecha + "_" + nombreFormat + "_" + cedulaFormat;
+      var folderName = idCreditoFormat + "_" + nombreFormat + "_" + cedulaFormat;
       var clientFolder = rootFolder.createFolder(folderName);
       
       // Crear subcarpetas
