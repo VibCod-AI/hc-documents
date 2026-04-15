@@ -37,32 +37,27 @@ function doGet(e) {
     if (e && e.parameter && e.parameter.action) {
       console.log('GET request con acción:', e.parameter.action);
       
-      if (e.parameter.action === 'getAllClients') {
-        logRequest("GET", e, "Obteniendo todos los clientes via GET");
-        
+      if (e.parameter.action === 'getAllClients' || e.parameter.action === 'getClientList') {
+        logRequest("GET", e, "Obteniendo lista ligera de clientes via GET");
+
         try {
-          console.log('🔄 Llamando a getAllClientsFromSheet()...');
-          var clients = getAllClientsFromSheet();
-          
-          console.log('✅ Clientes obtenidos:', clients.length);
-          logRequest("GET", e, "Clientes obtenidos via GET: " + clients.length + " registros");
-          
+          var clients = getClientListFromSheet();
+
+          logRequest("GET", e, "Lista obtenida via GET: " + clients.length + " registros");
+
           return ContentService.createTextOutput(
-            JSON.stringify({ 
-              ok: true, 
+            JSON.stringify({
+              ok: true,
               clients: clients,
               totalClients: clients.length
             })
           ).setMimeType(ContentService.MimeType.JSON);
-          
+
         } catch (error) {
-          console.error('❌ Error obteniendo clientes:', error);
-          logRequest("GET", e, "Error obteniendo clientes via GET: " + error.message);
+          console.error('Error obteniendo clientes:', error);
+          logRequest("GET", e, "Error: " + error.message);
           return ContentService.createTextOutput(
-            JSON.stringify({ 
-              ok: false, 
-              error: "Error obteniendo clientes: " + error.message
-            })
+            JSON.stringify({ ok: false, error: "Error obteniendo clientes: " + error.message })
           ).setMimeType(ContentService.MimeType.JSON);
         }
       }
@@ -150,30 +145,57 @@ function doPost(e) {
       }
     }
     
-    // Si es para obtener todos los clientes
-    if (requestData.action === 'getAllClients') {
-      logRequest("POST", e, "Obteniendo todos los clientes del Google Sheet");
-      
+    // Obtener solo el conteo y lista ligera de clientes (sin escaneo de Drive)
+    if (requestData.action === 'getClientList') {
+      logRequest("POST", e, "Obteniendo lista ligera de clientes");
+
       try {
-        var clients = getAllClientsFromSheet();
-        
-        logRequest("POST", e, "Clientes obtenidos: " + clients.length + " registros");
-        
+        var clientList = getClientListFromSheet();
+        logRequest("POST", e, "Lista ligera obtenida: " + clientList.length + " clientes");
+
         return ContentService.createTextOutput(
-          JSON.stringify({ 
-            ok: true, 
-            clients: clients,
-            totalClients: clients.length
+          JSON.stringify({
+            ok: true,
+            clients: clientList,
+            totalClients: clientList.length
           })
         ).setMimeType(ContentService.MimeType.JSON);
-        
+
       } catch (error) {
-        logRequest("POST", e, "Error obteniendo clientes: " + error.message);
+        logRequest("POST", e, "Error obteniendo lista: " + error.message);
         return ContentService.createTextOutput(
-          JSON.stringify({ 
-            ok: false, 
-            error: "Error obteniendo clientes: " + error.message
+          JSON.stringify({ ok: false, error: "Error obteniendo lista: " + error.message })
+        ).setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+
+    // Obtener clientes CON documentos de Drive, por lotes
+    if (requestData.action === 'getAllClients') {
+      var startIndex = requestData.startIndex || 0;
+      var batchSize = requestData.batchSize || 10;
+
+      logRequest("POST", e, "Obteniendo clientes en lote: inicio=" + startIndex + " tamaño=" + batchSize);
+
+      try {
+        var result = getAllClientsFromSheetBatched(startIndex, batchSize);
+
+        logRequest("POST", e, "Lote obtenido: " + result.clients.length + " de " + result.totalClients + " clientes");
+
+        return ContentService.createTextOutput(
+          JSON.stringify({
+            ok: true,
+            clients: result.clients,
+            totalClients: result.totalClients,
+            startIndex: startIndex,
+            batchSize: batchSize,
+            hasMore: result.hasMore
           })
+        ).setMimeType(ContentService.MimeType.JSON);
+
+      } catch (error) {
+        logRequest("POST", e, "Error obteniendo lote: " + error.message);
+        return ContentService.createTextOutput(
+          JSON.stringify({ ok: false, error: "Error obteniendo clientes: " + error.message })
         ).setMimeType(ContentService.MimeType.JSON);
       }
     }
@@ -708,88 +730,108 @@ function getSubfolderPath(clientFolder, documentType) {
   }
 }
 
-// --- FUNCIÓN PARA OBTENER TODOS LOS CLIENTES CON PROGRESO ---
-function getAllClientsFromSheet() {
-  try {
-    var ss = SpreadsheetApp.openById(DATA_SHEET_ID);
-    var sheet = ss.getSheetByName(DATA_SHEET_NAME);
-    
-    var lastRow = sheet.getLastRow();
-    
-    if (lastRow <= 1) {
-      return []; // No hay datos, solo encabezados
+// --- LISTA LIGERA DE CLIENTES (sin escaneo de Drive) ---
+function getClientListFromSheet() {
+  var ss = SpreadsheetApp.openById(DATA_SHEET_ID);
+  var sheet = ss.getSheetByName(DATA_SHEET_NAME);
+  var lastRow = sheet.getLastRow();
+
+  if (lastRow <= 1) return [];
+
+  var data = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
+  var clients = [];
+
+  for (var i = 0; i < data.length; i++) {
+    var row = data[i];
+    if (row[0] && row[2] && row[3]) {
+      clients.push({
+        rowNumber: i + 2,
+        credito: row[0].toString().trim(),
+        fecha: row[1],
+        nombre: row[2],
+        cedula: row[3].toString()
+      });
     }
-    
-    // Obtener todos los datos desde la fila 2 hasta la última
-    var range = sheet.getRange(2, 1, lastRow - 1, 6); // 6 columnas: A-F
-    var data = range.getValues();
-    
-    var clients = [];
-    var documentTypes = [
-      '01_escritura', '02_pagare', '03_contrato_credito', '04_carta_de_instrucciones',
-      '05_aceptacion_de_credito', '06_avaluo', '07_contrato_interco', '08_Finanzas'
-    ];
-    
-    for (var i = 0; i < data.length; i++) {
-      var row = data[i];
-      
-      // Verificar que la fila tenga datos válidos
-      if (row[1] && row[2] && row[3]) { // fecha, nombre, cédula
-        var clientName = row[2];
-        var clientId = row[3].toString();
-        
-        // Buscar carpeta del cliente y calcular progreso
-        var clientFolder = findClientFolder(clientName, clientId);
-        var documentsStatus = { completed: 0, total: 8, percentage: 0 };
-        var documentDetails = [];
-        
-        if (clientFolder) {
-          // 🚀 USAR LA FUNCIÓN OPTIMIZADA para obtener todos los documentos de una vez
-          var allDocuments = getAllClientDocuments(clientFolder);
-          
-          for (var j = 0; j < allDocuments.length; j++) {
-            var doc = allDocuments[j];
-            
-            if (doc.hasFiles) {
-              documentsStatus.completed++;
-            }
-            
-            documentDetails.push({
-              type: doc.type,
-              hasFiles: doc.hasFiles,
-              fileCount: doc.fileCount,
-              folderId: doc.folderId,
-              folderUrl: doc.folderUrl,
-              files: doc.files || [] // 🔥 INCLUIR ARCHIVOS INDIVIDUALES CON URLs
-            });
-          }
-          
-          documentsStatus.percentage = Math.round((documentsStatus.completed / documentsStatus.total) * 100);
-        }
-        
-        var client = {
-          rowNumber: i + 2, // +2 porque empezamos en fila 2
-          fecha: row[1],
-          nombre: clientName,
-          cedula: clientId,
-          folderUrl: clientFolder ? clientFolder.getUrl() : (row[5] || ''), // Usar URL de carpeta encontrada
-          folderId: clientFolder ? clientFolder.getId() : null,
-          hasFolder: !!clientFolder, // tiene carpeta si se encontró
-          documentsStatus: documentsStatus,
-          documentDetails: documentDetails
-        };
-        
-        clients.push(client);
-      }
-    }
-    
-    console.log('Clientes procesados con progreso:', clients.length);
-    return clients;
-    
-  } catch (error) {
-    console.error('Error obteniendo clientes:', error);
-    throw error;
   }
+
+  return clients;
+}
+
+
+// --- OBTENER CLIENTES CON DOCUMENTOS POR LOTES ---
+function getAllClientsFromSheetBatched(startIndex, batchSize) {
+  var ss = SpreadsheetApp.openById(DATA_SHEET_ID);
+  var sheet = ss.getSheetByName(DATA_SHEET_NAME);
+  var lastRow = sheet.getLastRow();
+
+  if (lastRow <= 1) {
+    return { clients: [], totalClients: 0, hasMore: false };
+  }
+
+  var data = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
+
+  // Filtrar filas válidas primero
+  var validRows = [];
+  for (var i = 0; i < data.length; i++) {
+    var row = data[i];
+    if (row[0] && row[2] && row[3]) {
+      validRows.push({ row: row, originalIndex: i });
+    }
+  }
+
+  var totalClients = validRows.length;
+  var endIndex = Math.min(startIndex + batchSize, totalClients);
+  var hasMore = endIndex < totalClients;
+  var batch = validRows.slice(startIndex, endIndex);
+
+  var clients = [];
+
+  for (var b = 0; b < batch.length; b++) {
+    var entry = batch[b];
+    var row = entry.row;
+    var clientName = row[2];
+    var clientId = row[3].toString();
+
+    var clientFolder = findClientFolder(clientName, clientId);
+    var documentsStatus = { completed: 0, total: 8, percentage: 0 };
+    var documentDetails = [];
+
+    if (clientFolder) {
+      var allDocuments = getAllClientDocuments(clientFolder);
+
+      for (var j = 0; j < allDocuments.length; j++) {
+        var doc = allDocuments[j];
+        if (doc.hasFiles) {
+          documentsStatus.completed++;
+        }
+        documentDetails.push({
+          type: doc.type,
+          hasFiles: doc.hasFiles,
+          fileCount: doc.fileCount,
+          folderId: doc.folderId,
+          folderUrl: doc.folderUrl,
+          files: doc.files || []
+        });
+      }
+
+      documentsStatus.percentage = Math.round((documentsStatus.completed / documentsStatus.total) * 100);
+    }
+
+    clients.push({
+      rowNumber: entry.originalIndex + 2,
+      fecha: row[1],
+      nombre: clientName,
+      cedula: clientId,
+      folderUrl: clientFolder ? clientFolder.getUrl() : '',
+      folderId: clientFolder ? clientFolder.getId() : null,
+      hasFolder: !!clientFolder,
+      documentsStatus: documentsStatus,
+      documentDetails: documentDetails
+    });
+  }
+
+  console.log('Lote procesado: ' + clients.length + ' clientes (de ' + totalClients + ' total)');
+  return { clients: clients, totalClients: totalClients, hasMore: hasMore };
 }
 
 

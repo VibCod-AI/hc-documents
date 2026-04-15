@@ -1,54 +1,144 @@
 import { supabase } from './supabase';
 import { CONFIG } from '@/config/urls';
 
-/**
- * 🔄 Servicio de sincronización entre Supabase y Google Drive
- * Mantiene los datos actualizados desde Google Drive/Sheets
- */
+const BATCH_SIZE = 8;
 
 /**
- * Sincronizar todos los clientes desde Google Sheets a Supabase
+ * Llamar al AppScript con reintentos
+ */
+async function callAppScript(body: Record<string, unknown>, retries = 2): Promise<any> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(CONFIG.APP_SCRIPT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(90_000), // 90s max por llamada
+      });
+
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result = await response.json();
+      if (!result.ok) throw new Error(result.error || 'Error en Apps Script');
+      return result;
+    } catch (error) {
+      if (attempt === retries) throw error;
+      console.warn(`Intento ${attempt + 1} falló, reintentando...`, error);
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+}
+
+/**
+ * Procesar un lote de clientes y guardarlo en Supabase (upsert, nunca delete)
+ */
+async function upsertClientBatch(clientsData: any[]): Promise<{ clients: number; documents: number; files: number }> {
+  let clients = 0, documents = 0, files = 0;
+
+  for (const clientData of clientsData) {
+    try {
+      // Upsert cliente por cédula
+      const { data: clientResult, error: clientError } = await supabase
+        .from('clients')
+        .upsert({
+          nombre: clientData.nombre,
+          cedula: clientData.cedula,
+          fecha: clientData.fecha,
+          fecha_escrituracion: clientData.fechaEscrituracion || null,
+          folder_url: clientData.folderUrl || null,
+          folder_id: clientData.folderId || null,
+          has_folder: clientData.hasFolder || false,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'cedula', ignoreDuplicates: false })
+        .select();
+
+      if (clientError || !clientResult?.length) {
+        console.error('Error upserting client:', clientError);
+        continue;
+      }
+
+      const insertedClient = clientResult[0];
+      clients++;
+
+      // Procesar documentos
+      if (!Array.isArray(clientData.documentDetails)) continue;
+
+      for (const doc of clientData.documentDetails) {
+        try {
+          const validFiles = (doc.files || []).filter((f: any) => {
+            if (!f.name) return false;
+            const name = f.name.toLowerCase();
+            return !name.startsWith('~$') && !name.startsWith('.') &&
+                   name !== 'desktop.ini' && name !== 'thumbs.db';
+          });
+
+          const realHasFiles = validFiles.length > 0;
+          const realFileCount = validFiles.length;
+
+          // Upsert documento
+          const { data: docResult, error: docError } = await supabase
+            .from('documents')
+            .upsert({
+              client_id: insertedClient.id,
+              type: doc.type,
+              label: doc.label || doc.type,
+              exists: doc.exists || false,
+              has_files: realHasFiles,
+              file_count: realFileCount,
+              folder_id: doc.folderId || null,
+              folder_url: doc.folderUrl || null,
+              updated_at: new Date().toISOString()
+            }, { onConflict: 'client_id,type', ignoreDuplicates: false })
+            .select();
+
+          if (docError || !docResult?.length) {
+            console.error('Error upserting document:', docError);
+            continue;
+          }
+
+          const insertedDoc = docResult[0];
+          documents++;
+
+          // Borrar archivos anteriores de ESTE documento y reinsertar los actuales
+          await supabase.from('files').delete().eq('document_id', insertedDoc.id);
+
+          for (const file of validFiles) {
+            const { error: fileError } = await supabase
+              .from('files')
+              .insert({
+                document_id: insertedDoc.id,
+                name: file.name,
+                file_id: file.id,
+                url: file.url,
+                download_url: file.downloadUrl || file.url,
+                size: file.size || null,
+                last_modified: file.lastModified ? new Date(file.lastModified).toISOString() : null
+              });
+            if (!fileError) files++;
+          }
+        } catch (error) {
+          console.error('Error processing document:', error);
+        }
+      }
+    } catch (error) {
+      console.error('Error processing client:', error);
+    }
+  }
+
+  return { clients, documents, files };
+}
+
+/**
+ * Sincronizar todos los clientes por lotes (sin borrar datos existentes)
  */
 export async function syncAllClients(): Promise<{ success: boolean; message: string; stats?: any }> {
   const startTime = Date.now();
-  
+
   try {
-    // Llamar al Apps Script para obtener todos los clientes
-    const response = await fetch(CONFIG.APP_SCRIPT_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        action: 'getAllClients'
-      }),
-    });
+    // Paso 1: obtener lista ligera de clientes para saber el total
+    const listResult = await callAppScript({ action: 'getClientList' });
+    const totalClients = listResult.totalClients || 0;
 
-    if (!response.ok) {
-      throw new Error(`Error HTTP: ${response.status}`);
-    }
-
-    const result = await response.json();
-    
-    if (!result.ok) {
-      throw new Error(result.error || 'Error en Apps Script');
-    }
-
-    // Verificar estructura de datos
-    let clientsData = null;
-    if (result.clients && Array.isArray(result.clients)) {
-      clientsData = result.clients;
-    } else if (result.data && result.data.clients) {
-      clientsData = result.data.clients;
-    } else if (Array.isArray(result.data)) {
-      clientsData = result.data;
-    } else if (Array.isArray(result)) {
-      clientsData = result;
-    } else {
-      throw new Error('Estructura de datos del Apps Script no reconocida');
-    }
-
-    if (!clientsData || clientsData.length === 0) {
+    if (totalClients === 0) {
       return {
         success: false,
         message: 'No se encontraron clientes en Google Sheets',
@@ -56,163 +146,84 @@ export async function syncAllClients(): Promise<{ success: boolean; message: str
       };
     }
 
-    let clientsUpdated = 0;
-    let documentsUpdated = 0;
-    let filesUpdated = 0;
+    // Guardar las cédulas que vienen del Sheet para limpiar zombies al final
+    const sheetCedulas = new Set<string>(
+      listResult.clients.map((c: any) => c.cedula.toString())
+    );
 
-    // 🧹 LIMPIAR DATOS EXISTENTES para sincronización limpia
-    await supabase.from('files').delete().neq('id', 0);
-    await supabase.from('documents').delete().neq('id', 0);
-    await supabase.from('clients').delete().neq('id', 0);
+    let totalStats = { clients: 0, documents: 0, files: 0 };
+    let startIndex = 0;
 
-    // Procesar cada cliente
-    for (const clientData of clientsData) {
-      try {
-        // Insertar o actualizar cliente
-        const { data: clientResult, error: clientError } = await supabase
-          .from('clients')
-          .upsert({
-            nombre: clientData.nombre,
-            cedula: clientData.cedula,
-            fecha: clientData.fecha,
-            fecha_escrituracion: clientData.fechaEscrituracion || null,
-            folder_url: clientData.folderUrl || null,
-            folder_id: clientData.folderId || null,
-            has_folder: clientData.hasFolder || false,
-            updated_at: new Date().toISOString()
-          }, {
-            onConflict: 'cedula',
-            ignoreDuplicates: false
-          })
-          .select();
+    // Paso 2: procesar por lotes con escaneo de Drive
+    while (startIndex < totalClients) {
+      console.log(`Procesando lote: ${startIndex}-${startIndex + BATCH_SIZE} de ${totalClients}`);
 
-        if (clientError) {
-          console.error('Error inserting client:', clientError);
-          continue;
-        }
+      const batchResult = await callAppScript({
+        action: 'getAllClients',
+        startIndex,
+        batchSize: BATCH_SIZE
+      });
 
-        if (!clientResult || clientResult.length === 0) {
-          console.error('No client returned after upsert');
-          continue;
-        }
+      const batchClients = batchResult.clients || [];
+      if (batchClients.length === 0) break;
 
-        const insertedClient = clientResult[0];
-        clientsUpdated++;
+      const batchStats = await upsertClientBatch(batchClients);
+      totalStats.clients += batchStats.clients;
+      totalStats.documents += batchStats.documents;
+      totalStats.files += batchStats.files;
 
-        // Procesar documentos del cliente
-        if (clientData.documentDetails && Array.isArray(clientData.documentDetails)) {
-          for (const doc of clientData.documentDetails) {
-            try {
-              // 🕵️ VALIDACIÓN ADICIONAL DE ARCHIVOS
-              // No confiar ciegamente en doc.hasFiles. Verificar la lista real de archivos.
-              // Filtrar archivos basura o temporales que puedan haber pasado
-              const validFiles = (doc.files || []).filter((f: any) => {
-                if (!f.name) return false;
-                const name = f.name.toLowerCase();
-                return !name.startsWith('~$') && // Archivos temporales de Office
-                       !name.startsWith('.') &&  // Archivos ocultos (.DS_Store, etc)
-                       name !== 'desktop.ini' && // Windows
-                       name !== 'thumbs.db';     // Windows
-              });
+      startIndex += BATCH_SIZE;
+    }
 
-              const realHasFiles = validFiles.length > 0;
-              const realFileCount = validFiles.length;
+    // Paso 3: limpiar clientes que ya no están en el Sheet (zombies)
+    const { data: allDbClients } = await supabase.from('clients').select('id, cedula');
+    if (allDbClients) {
+      const zombieIds = allDbClients
+        .filter(c => !sheetCedulas.has(c.cedula))
+        .map(c => c.id);
 
-              // Insertar o actualizar documento
-              const { data: docResult, error: docError } = await supabase
-                .from('documents')
-                .upsert({
-                  client_id: insertedClient.id,
-                  type: doc.type,
-                  label: doc.label || doc.type,
-                  exists: doc.exists || false,
-                  has_files: realHasFiles, // Usar valor recalculado
-                  file_count: realFileCount, // Usar valor recalculado
-                  folder_id: doc.folderId || null,
-                  folder_url: doc.folderUrl || null,
-                  updated_at: new Date().toISOString()
-                }, {
-                  onConflict: 'client_id,type',
-                  ignoreDuplicates: false
-                })
-                .select();
-
-              if (docError) {
-                console.error('Error inserting document:', docError);
-                continue;
-              }
-
-              if (!docResult || docResult.length === 0) continue;
-
-              const insertedDoc = docResult[0];
-              documentsUpdated++;
-
-              // Procesar archivos del documento (usando la lista filtrada)
-              if (validFiles.length > 0) {
-                for (const file of validFiles) {
-                  try {
-                    const { error: fileError } = await supabase
-                      .from('files')
-                      .insert({
-                        document_id: insertedDoc.id,
-                        name: file.name,
-                        file_id: file.id,
-                        url: file.url,
-                        download_url: file.downloadUrl || file.url,
-                        size: file.size || null,
-                        last_modified: file.lastModified ? new Date(file.lastModified).toISOString() : null
-                      });
-
-                    if (fileError) {
-                      console.error('Error inserting file:', fileError);
-                    } else {
-                      filesUpdated++;
-                    }
-                  } catch (error) {
-                    console.error('Error processing file:', error);
-                  }
-                }
-              }
-            } catch (error) {
-              console.error('Error processing document:', error);
-            }
-          }
-        }
-      } catch (error) {
-        console.error('Error processing client:', error);
+      if (zombieIds.length > 0) {
+        console.log(`Eliminando ${zombieIds.length} clientes que ya no están en el Sheet`);
+        await supabase.from('files').delete().in('document_id',
+          (await supabase.from('documents').select('id').in('client_id', zombieIds)).data?.map(d => d.id) || []
+        );
+        await supabase.from('documents').delete().in('client_id', zombieIds);
+        await supabase.from('clients').delete().in('id', zombieIds);
       }
     }
 
-    // Actualizar estado de sincronización
+    // Paso 4: registrar sync exitoso
     await supabase.from('sync_status').insert({
       last_sync: new Date().toISOString(),
       status: 'success',
-      total_clients: clientsUpdated,
-      total_documents: documentsUpdated
+      total_clients: totalStats.clients,
+      total_documents: totalStats.documents
     });
 
     const duration = Date.now() - startTime;
 
     return {
       success: true,
-      message: `Sincronización completada: ${clientsUpdated} clientes, ${documentsUpdated} documentos, ${filesUpdated} archivos`,
+      message: `Sincronización completada: ${totalStats.clients} clientes, ${totalStats.documents} documentos, ${totalStats.files} archivos`,
       stats: {
-        clientsUpdated,
-        documentsUpdated,
-        filesUpdated,
+        clientsUpdated: totalStats.clients,
+        documentsUpdated: totalStats.documents,
+        filesUpdated: totalStats.files,
+        totalInSheet: totalClients,
         duration
       }
     };
   } catch (error) {
     console.error('Error en sincronización:', error);
-    
-    // Registrar error
-    await supabase.from('sync_status').insert({
-      last_sync: new Date().toISOString(),
-      status: 'error',
-      total_clients: 0,
-      total_documents: 0
-    });
+
+    try {
+      await supabase.from('sync_status').insert({
+        last_sync: new Date().toISOString(),
+        status: 'error',
+        total_clients: 0,
+        total_documents: 0
+      });
+    } catch { /* ignorar error al registrar fallo */ }
 
     return {
       success: false,
@@ -226,49 +237,52 @@ export async function syncAllClients(): Promise<{ success: boolean; message: str
  */
 export async function syncClientAfterUpload(clientName: string, clientId: string): Promise<{ success: boolean; message: string; data?: any }> {
   try {
-    // Obtener datos actualizados del cliente desde Apps Script
-    const response = await fetch(CONFIG.APP_SCRIPT_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        action: 'findFolder',
-        clientName,
-        clientId,
-        documentType: '01_escritura' // Cualquier tipo, solo para obtener los datos
-      }),
+    // Obtener todos los documentos del cliente desde Drive
+    const result = await callAppScript({
+      action: 'findFolder',
+      clientName,
+      clientId
+      // Sin documentType → modo optimizado que trae todos los documentos
     });
 
-    if (!response.ok) {
-      throw new Error(`Error HTTP: ${response.status}`);
+    if (!result.ok || !result.data) {
+      throw new Error(result.error || 'No se encontró carpeta del cliente');
     }
 
-    const result = await response.json();
-    
-    if (!result.ok) {
-      throw new Error(result.error || 'Error obteniendo datos del cliente');
-    }
-
-    // Buscar cliente en la base de datos
+    // Buscar cliente en Supabase
     const { data: existingClients } = await supabase
       .from('clients')
       .select('*')
       .eq('cedula', clientId)
       .limit(1);
 
-    if (!existingClients || existingClients.length === 0) {
-      return {
-        success: false,
-        message: 'Cliente no encontrado en la base de datos'
-      };
+    if (!existingClients?.length) {
+      return { success: false, message: 'Cliente no encontrado en la base de datos' };
     }
 
     const client = existingClients[0];
 
-    // Actualizar documentos del cliente
-    // Aquí deberías implementar la lógica para actualizar los documentos
-    // basándote en la respuesta del Apps Script
+    // Upsert documentos y archivos del cliente
+    if (Array.isArray(result.data.documents)) {
+      await upsertClientBatch([{
+        nombre: client.nombre,
+        cedula: client.cedula,
+        fecha: client.fecha,
+        folderUrl: client.folder_url,
+        folderId: client.folder_id,
+        hasFolder: true,
+        documentDetails: result.data.documents.map((doc: any) => ({
+          type: doc.type,
+          label: doc.type,
+          exists: doc.exists,
+          hasFiles: doc.hasFiles,
+          fileCount: doc.fileCount,
+          folderId: doc.folderId,
+          folderUrl: doc.folderUrl,
+          files: doc.files || []
+        }))
+      }]);
+    }
 
     return {
       success: true,
@@ -284,3 +298,25 @@ export async function syncClientAfterUpload(clientName: string, clientId: string
   }
 }
 
+/**
+ * Obtener estado de la última sincronización
+ */
+export async function getSyncStatus() {
+  const { data } = await supabase
+    .from('sync_status')
+    .select('*')
+    .order('last_sync', { ascending: false })
+    .limit(1);
+
+  if (!data?.length) {
+    return { lastSync: null, status: 'never', totalClients: 0, totalDocuments: 0 };
+  }
+
+  const row = data[0];
+  return {
+    lastSync: row.last_sync,
+    status: row.status,
+    totalClients: row.total_clients,
+    totalDocuments: row.total_documents
+  };
+}
