@@ -365,6 +365,29 @@ function doPost(e) {
       ).setMimeType(ContentService.MimeType.JSON);
     }
     
+    // Forzar creación de carpeta para un cliente específico (por cédula)
+    if (requestData.action === 'forceCreateFolderByCedula') {
+      logRequest("POST", e, "Forzando creación de carpeta para cédula: " + requestData.cedula);
+      try {
+        var forceResult = forceCreateFolderByCedula(requestData.cedula);
+        return ContentService.createTextOutput(
+          JSON.stringify({
+            ok: true,
+            folderUrl: forceResult.folderUrl,
+            folderId: forceResult.folderId,
+            clientData: forceResult.clientData,
+            subfolders: forceResult.subfolders,
+            message: "Carpeta recreada exitosamente"
+          })
+        ).setMimeType(ContentService.MimeType.JSON);
+      } catch (error) {
+        logRequest("POST", e, "Error forceCreateFolderByCedula: " + error.message);
+        return ContentService.createTextOutput(
+          JSON.stringify({ ok: false, error: error.message })
+        ).setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+
     // Si es para crear carpetas faltantes en lote
     if (requestData.action === 'createMissingFolders') {
       logRequest("POST", e, "Iniciando creación de carpetas faltantes en lote");
@@ -394,12 +417,12 @@ function doPost(e) {
     }
 
     // Si no es búsqueda, usar la función original (crear carpeta)
-    var folderUrl = createLastClientFolder();
-    
-    logRequest("POST", e, "Carpeta creada: " + folderUrl);
-    
+    var folderResult = createLastClientFolder();
+
+    logRequest("POST", e, "Carpeta creada: " + folderResult.folderUrl);
+
     return ContentService.createTextOutput(
-      JSON.stringify({ ok: true, folderUrl: folderUrl })
+      JSON.stringify({ ok: true, folderUrl: folderResult.folderUrl, folderId: folderResult.folderId, clientData: folderResult.clientData })
     ).setMimeType(ContentService.MimeType.JSON);
     
   } catch (err) {
@@ -420,12 +443,31 @@ function createLastClientFolder() {
   var sheet = ss.getSheetByName(DATA_SHEET_NAME);
 
   var lastRow = sheet.getLastRow();
-  var data = sheet.getRange(lastRow, 1, 1, 4).getValues()[0];
-  // col 1: crédito (ID), col 2: fecha, col 3: nombre, col 4: cédula
+  var data = sheet.getRange(lastRow, 1, 1, 6).getValues()[0];
+  // col 1: crédito (ID), col 2: fecha, col 3: nombre, col 4: cédula, col 5: fecha escrituración, col 6: folderUrl
 
   var idCredito = data[0];
+  var fecha     = data[1];
   var nombre    = data[2];
   var cedula    = data[3];
+  var fechaEscrituracion = data[4] || null;
+
+  // Si ya tiene carpeta (col 6 no vacía), devolver los datos sin crear duplicado
+  if (data[5] && data[5].toString().trim() !== '') {
+    var existingUrl = data[5].toString().trim();
+    var existingMatch = existingUrl.match(/\/folders\/([a-zA-Z0-9-_]+)/);
+    return {
+      folderUrl: existingUrl,
+      folderId: existingMatch ? existingMatch[1] : null,
+      clientData: {
+        nombre: nombre,
+        cedula: cedula.toString(),
+        fecha: fecha,
+        fechaEscrituracion: fechaEscrituracion,
+        alreadyExisted: true
+      }
+    };
+  }
 
   var idCreditoFormat = idCredito.toString().trim();
   var nombreFormat = nombre.trim().replace(/\s+/g, "_").toLowerCase();
@@ -445,13 +487,24 @@ function createLastClientFolder() {
     "07_contrato_interco",
     "08_Finanzas"
   ];
-  
+
   subFolders.forEach(function(name) {
     clientFolder.createFolder(name);
   });
 
   sheet.getRange(lastRow, 6).setValue(clientFolder.getUrl());
-  return clientFolder.getUrl();
+
+  return {
+    folderUrl: clientFolder.getUrl(),
+    folderId: clientFolder.getId(),
+    clientData: {
+      nombre: nombre,
+      cedula: cedula.toString(),
+      fecha: fecha,
+      fechaEscrituracion: fechaEscrituracion,
+      alreadyExisted: false
+    }
+  };
 }
 
 
@@ -860,69 +913,177 @@ function createMissingFolders() {
   for (var i = 0; i < data.length; i++) {
     var row = data[i];
     var rowIndex = i + 2; // +2 porque el array empieza en 0 y el sheet tiene header en fila 1
-    
+
     // Verificar si tiene datos mínimos (crédito, nombre, cédula)
     if (!row[0] || !row[2] || !row[3]) continue;
-    
+
     var idCredito = row[0]; // Columna A: ID del crédito
+    var fecha     = row[1]; // Columna B: Fecha
     var nombre = row[2];    // Columna C: Nombre
     var cedula = row[3];    // Columna D: Cédula
+    var fechaEscrituracion = row[4] || null; // Columna E
     var existingUrl = row[5]; // Columna F: URL carpeta
-    
+
     // Si ya tiene URL en el sheet, asumimos que tiene carpeta (o intentar verificar si existe)
     if (existingUrl && existingUrl.toString().trim() !== "") {
-      // Opcional: Podríamos verificar si la carpeta realmente existe con DriveApp, 
+      // Opcional: Podríamos verificar si la carpeta realmente existe con DriveApp,
       // pero para optimizar asumimos que si está en el sheet, está bien.
       continue;
     }
-    
+
     // Intentar buscar si ya existe una carpeta (pero no estaba anotada en el sheet)
     var existingFolder = findClientFolder(nombre, cedula.toString());
-    
+
     if (existingFolder) {
       // Si existe pero no estaba en el sheet, actualizamos el sheet
       console.log('✅ Carpeta ya existía para:', nombre, '- Actualizando Sheet...');
       sheet.getRange(rowIndex, 6).setValue(existingFolder.getUrl());
-      details.push({ name: nombre, status: 'linked', url: existingFolder.getUrl() });
+      details.push({
+        name: nombre,
+        cedula: cedula.toString(),
+        credito: idCredito.toString(),
+        fecha: fecha,
+        fechaEscrituracion: fechaEscrituracion,
+        status: 'linked',
+        folderId: existingFolder.getId(),
+        folderUrl: existingFolder.getUrl(),
+        subfolders: getSubfoldersInfo(existingFolder)
+      });
       continue;
     }
-    
+
     // SI NO EXISTE: CREARLA
     console.log('🔨 Creando carpeta para:', nombre);
-    
+
     try {
       var idCreditoFormat = idCredito.toString().trim();
       var nombreFormat = nombre.toString().trim().replace(/\s+/g, "_").toLowerCase();
       var cedulaFormat = cedula.toString().replace(/[^\d]/g, "");
-      
+
       var folderName = idCreditoFormat + "_" + nombreFormat + "_" + cedulaFormat;
       var clientFolder = rootFolder.createFolder(folderName);
-      
-      // Crear subcarpetas
+
+      // Crear subcarpetas y recolectar info
+      var subfolderInfo = [];
       subFolders.forEach(function(subName) {
-        clientFolder.createFolder(subName);
+        var sub = clientFolder.createFolder(subName);
+        subfolderInfo.push({ type: subName, folderId: sub.getId(), folderUrl: sub.getUrl() });
       });
-      
+
       // Guardar URL en el sheet
       sheet.getRange(rowIndex, 6).setValue(clientFolder.getUrl());
-      
+
       createdCount++;
-      details.push({ name: nombre, status: 'created', url: clientFolder.getUrl() });
-      
+      details.push({
+        name: nombre,
+        cedula: cedula.toString(),
+        credito: idCredito.toString(),
+        fecha: fecha,
+        fechaEscrituracion: fechaEscrituracion,
+        status: 'created',
+        folderId: clientFolder.getId(),
+        folderUrl: clientFolder.getUrl(),
+        subfolders: subfolderInfo
+      });
+
       // Pequeña pausa para no saturar API de Drive si son muchos
       Utilities.sleep(500);
-      
+
     } catch (err) {
       console.error('❌ Error creando carpeta para ' + nombre + ':', err);
-      details.push({ name: nombre, status: 'error', error: err.message });
+      details.push({
+        name: nombre,
+        cedula: cedula ? cedula.toString() : null,
+        status: 'error',
+        error: err.message
+      });
     }
   }
-  
+
   console.log('🏁 Finalizado. Creadas:', createdCount);
   return {
     totalProcessed: data.length,
     createdCount: createdCount,
     details: details
+  };
+}
+
+// --- Helper: obtener info de subcarpetas existentes ---
+function getSubfoldersInfo(clientFolder) {
+  var result = [];
+  try {
+    var subs = clientFolder.getFolders();
+    while (subs.hasNext()) {
+      var s = subs.next();
+      result.push({ type: s.getName(), folderId: s.getId(), folderUrl: s.getUrl() });
+    }
+  } catch (e) {
+    console.error('Error getSubfoldersInfo:', e.message);
+  }
+  return result;
+}
+
+// --- FORZAR CREACIÓN DE CARPETA PARA UN CLIENTE ESPECÍFICO (por cédula) ---
+// Crea una NUEVA carpeta aunque ya exista una en Drive. Útil cuando la anterior fue eliminada o está rota.
+function forceCreateFolderByCedula(cedulaInput) {
+  if (!cedulaInput) throw new Error('cedula es requerida');
+  var cedulaNorm = cedulaInput.toString().replace(/[^\d]/g, "");
+
+  var rootFolder = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  var ss = SpreadsheetApp.openById(DATA_SHEET_ID);
+  var sheet = ss.getSheetByName(DATA_SHEET_NAME);
+  var lastRow = sheet.getLastRow();
+  if (lastRow <= 1) throw new Error('Sheet vacío');
+
+  var data = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
+  var matchIndex = -1;
+  for (var i = 0; i < data.length; i++) {
+    var r = data[i];
+    if (r[3] && r[3].toString().replace(/[^\d]/g, "") === cedulaNorm) {
+      matchIndex = i;
+      break;
+    }
+  }
+  if (matchIndex === -1) throw new Error('Cliente con cédula ' + cedulaNorm + ' no encontrado en el sheet');
+
+  var row = data[matchIndex];
+  var rowIndex = matchIndex + 2;
+  var idCredito = row[0];
+  var fecha = row[1];
+  var nombre = row[2];
+  var cedula = row[3];
+  var fechaEscrituracion = row[4] || null;
+
+  var idCreditoFormat = idCredito.toString().trim();
+  var nombreFormat = nombre.toString().trim().replace(/\s+/g, "_").toLowerCase();
+  var cedulaFormat = cedula.toString().replace(/[^\d]/g, "");
+  var folderName = idCreditoFormat + "_" + nombreFormat + "_" + cedulaFormat;
+
+  var clientFolder = rootFolder.createFolder(folderName);
+  var subFolderNames = [
+    "01_escritura", "02_pagare", "03_contrato_credito", "04_carta_de_instrucciones",
+    "05_aceptacion_de_credito", "06_avaluo", "07_contrato_interco", "08_Finanzas"
+  ];
+  var subfolderInfo = [];
+  subFolderNames.forEach(function(subName) {
+    var sub = clientFolder.createFolder(subName);
+    subfolderInfo.push({ type: subName, folderId: sub.getId(), folderUrl: sub.getUrl() });
+  });
+
+  sheet.getRange(rowIndex, 6).setValue(clientFolder.getUrl());
+
+  return {
+    folderUrl: clientFolder.getUrl(),
+    folderId: clientFolder.getId(),
+    clientData: {
+      nombre: nombre,
+      cedula: cedula.toString(),
+      fecha: fecha,
+      fechaEscrituracion: fechaEscrituracion,
+      credito: idCredito.toString(),
+      alreadyExisted: false
+    },
+    subfolders: subfolderInfo
   };
 }
 

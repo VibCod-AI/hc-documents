@@ -183,17 +183,20 @@ export function ClientDashboard({ onClientSelect }: ClientDashboardProps) {
       if (result.success) {
         if (data.action === 'createMissingFolders' && result.data && result.data.createdCount !== undefined) {
            toast.success(`Proceso completado: ${result.data.createdCount} carpetas creadas`, { duration: 5000 });
+        } else if (result.data?.alreadyExisted) {
+           toast.success(`${result.data.name} ya tenía carpeta, se actualizó en la base de datos`);
         } else {
-           toast.success('Carpeta creada exitosamente en Google Drive');
+           toast.success(`Carpeta creada para ${result.data?.name || 'el cliente'}`);
         }
-        
+
         setIsFolderModalOpen(false);
-        
-        // Esperar un momento para que Google indexe y luego sincronizar
-        toast.loading('Actualizando lista de clientes...', { duration: 3000 });
+
+        // Recargar lista de clientes desde Supabase (sin sync completo)
+        toast.loading('Actualizando lista de clientes...', { duration: 2000 });
+        setCachedDashboard([]);
         setTimeout(() => {
-          loadAllClients(true);
-        }, 2000);
+          loadAllClients(false);
+        }, 1000);
       } else {
         toast.error('Error: ' + result.error);
       }
