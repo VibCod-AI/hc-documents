@@ -1,32 +1,47 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { syncAllClients, getSyncStatus } from '@/lib/syncServiceSupabase';
+import { syncInit, syncBatch, syncFinalize, getSyncStatus, SYNC_BATCH_SIZE } from '@/lib/syncServiceSupabase';
+
+export const maxDuration = 300;
 
 export async function POST(request: NextRequest) {
   try {
-    let action = 'sync';
-
+    let body: any = {};
     try {
-      const body = await request.json();
-      if (body.action) action = body.action;
+      body = await request.json();
     } catch {
-      // Sin body o JSON inválido → sync por defecto
+      // sin body
     }
 
-    if (action === 'sync') {
-      console.log('Iniciando sincronización manual...');
-      const result = await syncAllClients();
-      return NextResponse.json(result);
+    const action = body.action || 'sync';
 
-    } else if (action === 'status') {
+    if (action === 'init') {
+      const result = await syncInit();
+      return NextResponse.json(result);
+    }
+
+    if (action === 'batch') {
+      const startIndex = Number.isFinite(body.startIndex) ? body.startIndex : 0;
+      const batchSize = Number.isFinite(body.batchSize) ? body.batchSize : SYNC_BATCH_SIZE;
+      const result = await syncBatch(startIndex, batchSize);
+      return NextResponse.json(result);
+    }
+
+    if (action === 'finalize') {
+      const sheetCedulas: string[] = Array.isArray(body.sheetCedulas) ? body.sheetCedulas : [];
+      const totals = body.totals || { clients: 0, documents: 0, files: 0 };
+      const result = await syncFinalize(sheetCedulas, totals);
+      return NextResponse.json(result);
+    }
+
+    if (action === 'status') {
       const status = await getSyncStatus();
       return NextResponse.json({ success: true, data: status });
-
-    } else {
-      return NextResponse.json(
-        { success: false, message: 'Acción no válida. Use "sync" o "status"' },
-        { status: 400 }
-      );
     }
+
+    return NextResponse.json(
+      { success: false, message: 'Acción no válida. Use "init", "batch", "finalize" o "status".' },
+      { status: 400 }
+    );
   } catch (error) {
     console.error('Error en API de sincronización:', error);
     return NextResponse.json(
@@ -45,7 +60,9 @@ export async function GET() {
       info: {
         message: 'Estado de sincronización',
         endpoints: {
-          'POST /api/sync': 'Sincronizar datos',
+          'POST /api/sync { action: "init" }': 'Inicia sync, retorna total y cédulas',
+          'POST /api/sync { action: "batch", startIndex, batchSize }': 'Procesa un lote',
+          'POST /api/sync { action: "finalize", sheetCedulas, totals }': 'Limpia zombies y registra',
           'GET /api/sync': 'Obtener estado'
         }
       }

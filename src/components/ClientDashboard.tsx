@@ -49,26 +49,70 @@ export function ClientDashboard({ onClientSelect }: ClientDashboardProps) {
 
   const loadAllClients = async (forceSync = false) => {
     setIsLoading(true);
-    
-    // 🚀 Si es sincronización forzada, llamar al endpoint de sync
+
+    // 🚀 Si es sincronización forzada, ejecutar sync paginado lote por lote
     if (forceSync) {
-      toast.loading('Sincronizando con Google Drive...', { id: 'loading' });
-      
       try {
-        // Llamar al endpoint que sincroniza con Google Drive
-        const syncResponse = await fetch('/api/sync', {
+        toast.loading('Iniciando sincronización...', { id: 'loading' });
+
+        // Paso 1: init
+        const initRes = await fetch('/api/sync', {
           method: 'POST',
-        });
-        
-        const syncResult = await syncResponse.json();
-        
-        if (syncResult.success) {
-          toast.success(`Sincronizado: ${syncResult.stats.clientsUpdated} clientes actualizados`, { id: 'loading' });
-          
-          // Limpiar caché para forzar recarga
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'init' })
+        }).then(r => r.json());
+
+        if (!initRes.success) {
+          toast.error('Error iniciando sync: ' + (initRes.message || 'desconocido'), { id: 'loading' });
+          setIsLoading(false);
+          return;
+        }
+
+        const totalClients: number = initRes.totalClients;
+        const sheetCedulas: string[] = initRes.sheetCedulas;
+        const batchSize: number = initRes.batchSize || 8;
+        const totals = { clients: 0, documents: 0, files: 0 };
+
+        // Paso 2: procesar lotes secuencialmente
+        let startIndex = 0;
+        let hasMore = true;
+        while (hasMore) {
+          const end = Math.min(startIndex + batchSize, totalClients);
+          toast.loading(`Sincronizando ${startIndex + 1}-${end} de ${totalClients}...`, { id: 'loading' });
+
+          const batchRes = await fetch('/api/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'batch', startIndex, batchSize })
+          }).then(r => r.json());
+
+          if (!batchRes.success) {
+            toast.error(`Error en lote ${startIndex}: ${batchRes.message || 'desconocido'}`, { id: 'loading' });
+            setIsLoading(false);
+            return;
+          }
+
+          totals.clients += batchRes.stats?.clients || 0;
+          totals.documents += batchRes.stats?.documents || 0;
+          totals.files += batchRes.stats?.files || 0;
+
+          hasMore = !!batchRes.hasMore && batchRes.nextStartIndex > startIndex;
+          startIndex = batchRes.nextStartIndex;
+        }
+
+        // Paso 3: finalize (limpia zombies + registra)
+        toast.loading('Finalizando sincronización...', { id: 'loading' });
+        const finalRes = await fetch('/api/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'finalize', sheetCedulas, totals })
+        }).then(r => r.json());
+
+        if (finalRes.success) {
+          toast.success(`Sincronizado: ${totals.clients} clientes, ${totals.documents} documentos`, { id: 'loading' });
           setCachedDashboard([]);
         } else {
-          toast.error('Error en sincronización: ' + syncResult.message, { id: 'loading' });
+          toast.error('Error finalizando: ' + (finalRes.message || 'desconocido'), { id: 'loading' });
           setIsLoading(false);
           return;
         }

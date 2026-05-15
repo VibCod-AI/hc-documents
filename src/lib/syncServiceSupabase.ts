@@ -127,107 +127,133 @@ async function upsertClientBatch(clientsData: any[]): Promise<{ clients: number;
   return { clients, documents, files };
 }
 
+export const SYNC_BATCH_SIZE = BATCH_SIZE;
+
 /**
- * Sincronizar todos los clientes por lotes (sin borrar datos existentes)
+ * Paso 1: obtener total y lista de cédulas del Sheet (rápido, sin escanear Drive).
+ * El frontend guarda las cédulas y las pasa de vuelta en `finalize` para limpiar zombies.
  */
-export async function syncAllClients(): Promise<{ success: boolean; message: string; stats?: any }> {
-  const startTime = Date.now();
+export async function syncInit(): Promise<{ success: boolean; message?: string; totalClients: number; sheetCedulas: string[]; batchSize: number }> {
+  const listResult = await callAppScript({ action: 'getClientList' });
+  const totalClients = listResult.totalClients || 0;
+  const sheetCedulas: string[] = (listResult.clients || []).map((c: any) => c.cedula.toString());
 
+  if (totalClients === 0) {
+    return {
+      success: false,
+      message: 'No se encontraron clientes en Google Sheets',
+      totalClients: 0,
+      sheetCedulas: [],
+      batchSize: SYNC_BATCH_SIZE
+    };
+  }
+
+  return { success: true, totalClients, sheetCedulas, batchSize: SYNC_BATCH_SIZE };
+}
+
+/**
+ * Paso 2: procesar UN solo lote. El frontend itera llamando esto.
+ */
+export async function syncBatch(startIndex: number, batchSize: number): Promise<{
+  success: boolean;
+  message?: string;
+  startIndex: number;
+  processedInBatch: number;
+  stats: { clients: number; documents: number; files: number };
+  hasMore: boolean;
+  nextStartIndex: number;
+}> {
+  const size = batchSize || SYNC_BATCH_SIZE;
+  console.log(`Procesando lote: ${startIndex}-${startIndex + size}`);
+
+  const batchResult = await callAppScript({
+    action: 'getAllClients',
+    startIndex,
+    batchSize: size
+  });
+
+  const batchClients = batchResult.clients || [];
+  const totalInSheet: number = batchResult.totalClients || 0;
+  const apiHasMore: boolean = !!batchResult.hasMore;
+
+  if (batchClients.length === 0) {
+    return {
+      success: true,
+      startIndex,
+      processedInBatch: 0,
+      stats: { clients: 0, documents: 0, files: 0 },
+      hasMore: false,
+      nextStartIndex: startIndex
+    };
+  }
+
+  const stats = await upsertClientBatch(batchClients);
+  const nextStartIndex = startIndex + size;
+
+  return {
+    success: true,
+    startIndex,
+    processedInBatch: batchClients.length,
+    stats,
+    hasMore: apiHasMore && nextStartIndex < totalInSheet,
+    nextStartIndex
+  };
+}
+
+/**
+ * Paso 3: limpiar zombies y registrar sync exitoso.
+ */
+export async function syncFinalize(sheetCedulas: string[], totals: { clients: number; documents: number; files: number }): Promise<{ success: boolean; message: string; stats?: any }> {
   try {
-    // Paso 1: obtener lista ligera de clientes para saber el total
-    const listResult = await callAppScript({ action: 'getClientList' });
-    const totalClients = listResult.totalClients || 0;
+    const cedulaSet = new Set(sheetCedulas.map(c => c.toString()));
 
-    if (totalClients === 0) {
-      return {
-        success: false,
-        message: 'No se encontraron clientes en Google Sheets',
-        stats: { clientsUpdated: 0, documentsUpdated: 0, filesUpdated: 0, duration: Date.now() - startTime }
-      };
-    }
-
-    // Guardar las cédulas que vienen del Sheet para limpiar zombies al final
-    const sheetCedulas = new Set<string>(
-      listResult.clients.map((c: any) => c.cedula.toString())
-    );
-
-    let totalStats = { clients: 0, documents: 0, files: 0 };
-    let startIndex = 0;
-
-    // Paso 2: procesar por lotes con escaneo de Drive
-    while (startIndex < totalClients) {
-      console.log(`Procesando lote: ${startIndex}-${startIndex + BATCH_SIZE} de ${totalClients}`);
-
-      const batchResult = await callAppScript({
-        action: 'getAllClients',
-        startIndex,
-        batchSize: BATCH_SIZE
-      });
-
-      const batchClients = batchResult.clients || [];
-      if (batchClients.length === 0) break;
-
-      const batchStats = await upsertClientBatch(batchClients);
-      totalStats.clients += batchStats.clients;
-      totalStats.documents += batchStats.documents;
-      totalStats.files += batchStats.files;
-
-      startIndex += BATCH_SIZE;
-    }
-
-    // Paso 3: limpiar clientes que ya no están en el Sheet (zombies)
     const { data: allDbClients } = await supabase.from('clients').select('id, cedula');
     if (allDbClients) {
       const zombieIds = allDbClients
-        .filter(c => !sheetCedulas.has(c.cedula))
+        .filter(c => !cedulaSet.has(c.cedula))
         .map(c => c.id);
 
       if (zombieIds.length > 0) {
         console.log(`Eliminando ${zombieIds.length} clientes que ya no están en el Sheet`);
-        await supabase.from('files').delete().in('document_id',
-          (await supabase.from('documents').select('id').in('client_id', zombieIds)).data?.map(d => d.id) || []
-        );
+        const docIds = (await supabase.from('documents').select('id').in('client_id', zombieIds)).data?.map(d => d.id) || [];
+        if (docIds.length > 0) {
+          await supabase.from('files').delete().in('document_id', docIds);
+        }
         await supabase.from('documents').delete().in('client_id', zombieIds);
         await supabase.from('clients').delete().in('id', zombieIds);
       }
     }
 
-    // Paso 4: registrar sync exitoso
     await supabase.from('sync_status').insert({
       last_sync: new Date().toISOString(),
       status: 'success',
-      total_clients: totalStats.clients,
-      total_documents: totalStats.documents
+      total_clients: totals.clients,
+      total_documents: totals.documents
     });
-
-    const duration = Date.now() - startTime;
 
     return {
       success: true,
-      message: `Sincronización completada: ${totalStats.clients} clientes, ${totalStats.documents} documentos, ${totalStats.files} archivos`,
+      message: `Sincronización completada: ${totals.clients} clientes, ${totals.documents} documentos, ${totals.files} archivos`,
       stats: {
-        clientsUpdated: totalStats.clients,
-        documentsUpdated: totalStats.documents,
-        filesUpdated: totalStats.files,
-        totalInSheet: totalClients,
-        duration
+        clientsUpdated: totals.clients,
+        documentsUpdated: totals.documents,
+        filesUpdated: totals.files
       }
     };
   } catch (error) {
-    console.error('Error en sincronización:', error);
-
+    console.error('Error finalizando sync:', error);
     try {
       await supabase.from('sync_status').insert({
         last_sync: new Date().toISOString(),
         status: 'error',
-        total_clients: 0,
-        total_documents: 0
+        total_clients: totals.clients,
+        total_documents: totals.documents
       });
-    } catch { /* ignorar error al registrar fallo */ }
+    } catch { /* ignore */ }
 
     return {
       success: false,
-      message: error instanceof Error ? error.message : 'Error desconocido en sincronización'
+      message: error instanceof Error ? error.message : 'Error finalizando sync'
     };
   }
 }
